@@ -3,12 +3,6 @@ project(Xlsynth)
 
 set(CMAKE_CXX_STANDARD 20)
 
-# Define the output directory for generated files
-set(GENFILES_DIR ${CMAKE_BINARY_DIR}/genfiles)
-
-# Ensure the genfiles directory exists
-file(MAKE_DIRECTORY ${GENFILES_DIR})
-
 # Set the output directories
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -28,6 +22,10 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 find_package(Z3 REQUIRED)
 message(STATUS "Found Z3 ${Z3_VERSION}")
 message(STATUS "Using Z3Config.cmake in: ${Z3_DIR}")
+
+find_package(OpenSSL REQUIRED)
+message(STATUS "Found OpenSSL ${OPENSSL_VERSION}")
+message(STATUS "Using OpenSSL include directory: ${OPENSSL_INCLUDE_DIR}")
 
 # Print available Z3 targets for diagnostics
 get_cmake_property(_variableNames VARIABLES)
@@ -66,6 +64,21 @@ file(GLOB_RECURSE COMMON_SOURCES "${XLS_REPO_DIR}/xls/common/*.cc")
 file(GLOB_RECURSE IR_SOURCES "${XLS_REPO_DIR}/xls/ir/*.cc")
 file(GLOB_RECURSE SCHEDULING_SOURCES "${XLS_REPO_DIR}/xls/scheduling/*.cc")
 file(GLOB_RECURSE CODEGEN_SOURCES "${XLS_REPO_DIR}/xls/codegen/*.cc")
+file(GLOB_RECURSE DSLX_SOURCES "${XLS_REPO_DIR}/xls/dslx/*.cc")
+
+# Function to filter out _main.cc and _test.cc files from a list of sources
+function(filter_sources VAR)
+    set(SRC_LIST "${${VAR}}")
+    list(FILTER SRC_LIST EXCLUDE REGEX ".+_main\\.cc")
+    list(FILTER SRC_LIST EXCLUDE REGEX ".+_test\\.cc")
+    set(${VAR} "${SRC_LIST}" PARENT_SCOPE)
+endfunction()
+
+# Filter out files ending with _main.cc and _test.cc
+filter_sources(COMMON_SOURCES)
+filter_sources(IR_SOURCES)
+filter_sources(SCHEDULING_SOURCES)
+filter_sources(CODEGEN_SOURCES)
 
 # Add object libraries for each component
 add_library(xls_common OBJECT ${COMMON_SOURCES})
@@ -73,23 +86,64 @@ add_library(xls_ir OBJECT ${IR_SOURCES})
 add_library(xls_scheduling OBJECT ${SCHEDULING_SOURCES})
 add_library(xls_codegen OBJECT ${CODEGEN_SOURCES})
 
+# Add a target-specific definition for BUILD_EMBED_LABEL
+target_compile_definitions(xls_common PRIVATE BUILD_EMBED_LABEL="\"your_label\"")
+
 # Custom command to generate xls/ir/op.h in the genfiles directory
 add_custom_command(
-    OUTPUT ${GENFILES_DIR}/op.h
-    COMMAND ${CMAKE_COMMAND} -E env ${XLS_REPO_DIR}/xls/ir/render_specification_against_template ${XLS_REPO_DIR}/xls/ir/op_header.tmpl | clang-format > ${GENFILES_DIR}/op.h
-    DEPENDS ${XLS_REPO_DIR}/xls/ir/op_header.tmpl ${XLS_REPO_DIR}/xls/ir/render_specification_against_template
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xls/ir/op.h
+    COMMAND python3 ${XLS_REPO_DIR}/xls/ir/render_specification_against_template.py ${XLS_REPO_DIR}/xls/ir/op_header.tmpl | clang-format > ${CMAKE_CURRENT_BINARY_DIR}/xls/ir/op.h
+    DEPENDS ${XLS_REPO_DIR}/xls/ir/op_header.tmpl ${XLS_REPO_DIR}/xls/ir/render_specification_against_template.py
     COMMENT "Generating and formatting op.h"
     VERBATIM
 )
 
 # Custom target to run the custom command
-add_custom_target(generate_op_h ALL DEPENDS ${GENFILES_DIR}/op.h)
+add_custom_target(generate_op_h ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/xls/ir/op.h)
 
 # Ensure the generation of op.h before building xls_ir
 add_dependencies(xls_ir generate_op_h)
 
 # Add the generated file to the list of IR sources
-list(APPEND IR_SOURCES ${GENFILES_DIR}/op.h)
+list(APPEND IR_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/xls/ir/op.h)
+
+# -- nodes.h
+
+# Define paths for templates and output
+set(NODES_HEADER_TEMPLATE "${XLS_REPO_DIR}/xls/ir/nodes_header.tmpl")
+set(NODES_SOURCE_TEMPLATE "${XLS_REPO_DIR}/xls/ir/nodes_source.tmpl")
+set(NODES_HEADER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/xls/ir/nodes.h")
+set(NODES_SOURCE_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/xls/ir/nodes.cc")
+
+# Ensure the output directory exists
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/xls/ir")
+
+# Custom command to generate nodes.h
+add_custom_command(
+    OUTPUT ${NODES_HEADER_OUTPUT}
+    COMMAND python3 ${XLS_REPO_DIR}/xls/ir/render_specification_against_template.py ${NODES_HEADER_TEMPLATE}
+    COMMAND clang-format -i ${NODES_HEADER_OUTPUT}
+    DEPENDS ${NODES_HEADER_TEMPLATE} ${XLS_REPO_DIR}/xls/ir/render_specification_against_template.py
+    COMMENT "Generating and formatting nodes.h"
+    VERBATIM
+)
+
+# Custom command to generate nodes.cc
+add_custom_command(
+    OUTPUT ${NODES_SOURCE_OUTPUT}
+    COMMAND python3 ${XLS_REPO_DIR}/xls/ir/render_specification_against_template.py ${NODES_SOURCE_TEMPLATE}
+    COMMAND clang-format -i ${NODES_SOURCE_OUTPUT}
+    DEPENDS ${NODES_SOURCE_TEMPLATE} ${XLS_REPO_DIR}/xls/ir/render_specification_against_template.py
+    COMMENT "Generating and formatting nodes.cc"
+    VERBATIM
+)
+
+# Custom target to run the custom commands
+add_custom_target(generate_nodes ALL DEPENDS ${NODES_HEADER_OUTPUT} ${NODES_SOURCE_OUTPUT})
+
+list(APPEND IR_SOURCES ${CMAKE_CURRENT_BINARY_DIR/xls/ir/nodes.cc})
+
+# --
 
 # Create the shared library from the object libraries
 add_library(xls SHARED
@@ -138,3 +192,121 @@ target_link_libraries(xls
 
     protobuf::libprotobuf
 )
+
+# -- 
+
+# -- ir_converter_main
+
+# Add source files for ir_converter_main
+set(IR_CONVERTER_MAIN_SOURCES
+    ${XLS_REPO_DIR}/xls/dslx/ir_convert/ir_converter_main.cc
+    # Add any additional source files required by ir_converter_main here
+    ${COMMON_SOURCES}
+)
+
+# Create an executable target for ir_converter_main
+add_executable(ir_converter_main ${IR_CONVERTER_MAIN_SOURCES})
+
+target_include_directories(ir_converter_main PUBLIC
+    ${XLS_REPO_DIR}
+    ${LLVM_INCLUDE_DIRS}
+    ${Z3_INCLUDE_DIRS}
+    ${GTEST_DIR}/googletest/include
+    ${GTEST_DIR}/googlemock/include
+    ${benchmark_INCLUDE_DIRS}
+    ${Protobuf_INCLUDE_DIR}
+    ${RE2_DIR}/re2
+)
+
+# Link dependencies for ir_converter_main
+target_link_libraries(ir_converter_main
+    ${LLVM_LIBRARIES}
+    ${Z3_TARGET}
+    re2
+    GTest::gtest
+    GTest::gtest_main
+    GTest::gmock
+    GTest::gmock_main
+    benchmark::benchmark
+    protobuf::libprotobuf
+    absl::base
+    absl::synchronization
+    absl::strings
+)
+
+# Define the proto files
+set(PROTO_FILES
+    ${XLS_REPO_DIR}/xls/ir/foreign_function_data.proto
+    ${XLS_REPO_DIR}/xls/ir/xls_type.proto
+    ${XLS_REPO_DIR}/xls/ir/xls_value.proto
+    ${XLS_REPO_DIR}/xls/fuzzer/ast_generator_options.proto
+    # Add more proto files here as needed
+)
+
+# Define the output directory for the generated files
+set(PROTO_SRCS)
+set(PROTO_HDRS)
+foreach(PROTO ${PROTO_FILES})
+    file(RELATIVE_PATH PROTO_REL_PATH ${XLS_REPO_DIR} ${PROTO})
+    get_filename_component(PROTO_DIR ${PROTO_REL_PATH} DIRECTORY)
+    get_filename_component(PROTO_NAME ${PROTO} NAME_WE)
+    list(APPEND PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/${PROTO_DIR}/${PROTO_NAME}.pb.cc")
+    list(APPEND PROTO_HDRS "${CMAKE_CURRENT_BINARY_DIR}/${PROTO_DIR}/${PROTO_NAME}.pb.h")
+endforeach()
+
+# Add custom command to generate protobuf files
+add_custom_command(
+    OUTPUT ${PROTO_SRCS} ${PROTO_HDRS}
+    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+    ARGS --experimental_allow_proto3_optional --cpp_out ${CMAKE_CURRENT_BINARY_DIR} --proto_path ${XLS_REPO_DIR} ${PROTO_FILES}
+    DEPENDS ${PROTO_FILES}
+    COMMENT "Running C++ protocol buffer compiler on ${PROTO_FILES} hdrs: ${PROTO_HDRS} srcs: ${PROTO_SRCS}"
+    VERBATIM
+)
+
+# Create a target to hold the generated files
+add_custom_target(proto_gen ALL DEPENDS ${PROTO_SRCS} ${PROTO_HDRS})
+
+# -- mangle_test
+
+# Create an executable target for the test
+add_executable(mangle_test
+    ${XLS_REPO_DIR}/xls/dslx/mangle_test.cc
+    ${DSLX_SOURCES}
+    ${IR_SOURCES}
+)
+
+add_dependencies(mangle_test proto_gen)
+
+# Include directories for the test
+target_include_directories(mangle_test PUBLIC
+    ${XLS_REPO_DIR}
+    ${LLVM_INCLUDE_DIRS}
+    ${GTEST_DIR}/googletest/include
+    ${GTEST_DIR}/googlemock/include
+    ${benchmark_INCLUDE_DIRS}
+    ${Protobuf_INCLUDE_DIR}
+    ${RE2_DIR}/re2
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${OPENSSL_INCLUDE_DIR}
+)
+
+# Link dependencies for the test
+target_link_libraries(mangle_test
+    ${LLVM_LIBRARIES}
+    re2
+    GTest::gtest
+    GTest::gtest_main
+    GTest::gmock
+    GTest::gmock_main
+    benchmark::benchmark
+    protobuf::libprotobuf
+    absl::base
+    absl::synchronization
+    absl::strings
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+
+# Add the test to CTest
+add_test(NAME mangle_test COMMAND mangle_test)
